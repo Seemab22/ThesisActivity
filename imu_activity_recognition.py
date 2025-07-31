@@ -138,12 +138,13 @@ class PositionalEncoding(nn.Module):
         return x + self.pe[:, :x.size(1)]
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, d_model: int, n_head: int):
+    def __init__(self, d_model: int, n_head: int, drop: float = 0.1):
         super().__init__()
         self.n_head = n_head
         self.d_head = d_model // n_head
         self.qkv = nn.Linear(d_model, 3 * d_model)
         self.out = nn.Linear(d_model, d_model)
+        self.drop = nn.Dropout(drop)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, T, C = x.size()
@@ -152,7 +153,8 @@ class MultiHeadAttention(nn.Module):
         attn = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.d_head)
         attn = attn.softmax(dim=-1)
         out = torch.matmul(attn, v).transpose(1, 2).reshape(B, T, C)
-        return self.out(out)
+        out = self.out(out)
+        return self.drop(out)
 
 class FeedForward(nn.Module):
     def __init__(self, d_model: int, hidden: int, drop: float = 0.3):
@@ -170,31 +172,37 @@ class FeedForward(nn.Module):
 class EncoderLayer(nn.Module):
     def __init__(self, d_model: int, n_head: int, hidden: int, drop: float = 0.3):
         super().__init__()
-        self.attn = MultiHeadAttention(d_model, n_head)
+        self.attn = MultiHeadAttention(d_model, n_head, drop)
         self.norm1 = nn.LayerNorm(d_model)
         self.norm2 = nn.LayerNorm(d_model)
         self.ff = FeedForward(d_model, hidden, drop)
+        self.drop = nn.Dropout(drop)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.norm1(x + self.attn(x))
-        x = self.norm2(x + self.ff(x))
+        x = self.norm1(x + self.drop(self.attn(x)))
+        x = self.norm2(x + self.drop(self.ff(x)))
         return x
 
 class TransformerModel(nn.Module):
-    def __init__(self, d_model: int = 64, n_head: int = 4, n_layers: int = 2,
-                 hidden: int = 128, n_classes: int = 4, seq_len: int = 100):
+    def __init__(self, d_model: int = 128, n_head: int = 8, n_layers: int = 3,
+                 hidden: int = 256, n_classes: int = 4, seq_len: int = 100,
+                 drop: float = 0.1):
         super().__init__()
         self.proj = nn.Sequential(
             nn.Linear(6, d_model),
-            nn.BatchNorm1d(seq_len)
+            nn.LayerNorm(d_model),
+            nn.ReLU(),
+            nn.Dropout(drop)
         )
         self.pos = PositionalEncoding(d_model)
-        self.layers = nn.ModuleList([EncoderLayer(d_model, n_head, hidden) for _ in range(n_layers)])
+        self.layers = nn.ModuleList([
+            EncoderLayer(d_model, n_head, hidden, drop=drop) for _ in range(n_layers)
+        ])
         self.head = nn.Sequential(
             nn.Flatten(),
             nn.Linear(d_model * seq_len, 256),
             nn.ReLU(),
-            nn.Dropout(0.3),
+            nn.Dropout(drop),
             nn.Linear(256, n_classes)
         )
 
@@ -321,6 +329,7 @@ def cross_validate(frames: np.ndarray, labels: np.ndarray, root_dir: str, *,
         plt.show()
 
         model.load_state_dict(best_wts)
+        va_loss, va_acc, preds, labs = validate(model, val_loader, loss_fn)
         acc = accuracy_score(labs, preds)
         prec = precision_score(labs, preds, average='weighted')
         rec = recall_score(labs, preds, average='weighted')
